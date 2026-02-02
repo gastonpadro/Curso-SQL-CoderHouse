@@ -241,105 +241,56 @@ ORDER BY c.id_categoria, t.item_n;
 
 -- Inserción masiva en la tabla variantes
 INSERT INTO variantes (id_producto, id_talle, id_color, precio, stock)
-SELECT
-  p.id_producto,
-  t3.id_talle,
-  c3.id_color,
-
-  -- Precio variante: precio_base + ajuste por talle + ajuste por color
-  ROUND(
-    p.precio_base
-    + CASE t3.pos_talle
-        WHEN 1 THEN 0
-        WHEN 2 THEN 500
-        WHEN 3 THEN 1000
-      END
-    + CASE c3.pos_color
-        WHEN 1 THEN 0
-        WHEN 2 THEN 250
-        WHEN 3 THEN 400
-      END
-  , 2) AS precio,
-
-  -- Stock: 10..79 aprox, variando por talle/color/producto
-  (10 + (p.id_producto * 3 + t3.pos_talle * 7 + c3.pos_color * 11) % 70) AS stock
-
-FROM productos p
-
--- 3 talles por producto (rotan según id_producto)
-JOIN (
+WITH
+talles_rn AS (
   SELECT
     id_talle,
-    (@rt := @rt + 1) AS rn
+    CAST(ROW_NUMBER() OVER (ORDER BY id_talle) AS SIGNED) AS rn,
+    CAST(COUNT(*) OVER () AS SIGNED) AS cnt
   FROM talles
-  CROSS JOIN (SELECT @rt := 0) init
-  ORDER BY id_talle
-) t_rank
-  ON 1=1
-JOIN (
-  SELECT
-    tr.id_talle,
-    tr.rn,
-    1 AS pos_talle
-  FROM (
-    SELECT id_talle, (@r1 := @r1 + 1) AS rn
-    FROM talles
-    CROSS JOIN (SELECT @r1 := 0) i1
-    ORDER BY id_talle
-  ) tr
-) dummy_t ON 1=1
-
--- Armamos exactamente 3 talles por producto usando lógica modular
-JOIN (
-  SELECT
-    tr.id_talle,
-    tr.rn,
-    CASE
-      WHEN tr.rn = 1 THEN 1
-      WHEN tr.rn = 2 THEN 2
-      WHEN tr.rn = 3 THEN 3
-      ELSE NULL
-    END AS pos_talle
-  FROM (
-    SELECT id_talle, (@rta := @rta + 1) AS rn
-    FROM talles
-    CROSS JOIN (SELECT @rta := 0) it
-    ORDER BY id_talle
-  ) tr
-  WHERE tr.rn <= 3
-) t3
-  ON 1=1
-
--- 3 colores por producto (tomamos 3 y rotamos luego con un ORDER BY estable)
-JOIN (
+),
+colores_rn AS (
   SELECT
     id_color,
-    (@rc := @rc + 1) AS rn
+    CAST(ROW_NUMBER() OVER (ORDER BY id_color) AS SIGNED) AS rn,
+    CAST(COUNT(*) OVER () AS SIGNED) AS cnt
   FROM colores
-  CROSS JOIN (SELECT @rc := 0) initc
-  ORDER BY id_color
-) c_rank
-  ON 1=1
-
-JOIN (
+),
+sel_talles AS (
   SELECT
-    cr.id_color,
-    cr.rn,
-    CASE
-      WHEN cr.rn = 1 THEN 1
-      WHEN cr.rn = 2 THEN 2
-      WHEN cr.rn = 3 THEN 3
-      ELSE NULL
-    END AS pos_color
-  FROM (
-    SELECT id_color, (@rca := @rca + 1) AS rn
-    FROM colores
-    CROSS JOIN (SELECT @rca := 0) ic
-    ORDER BY id_color
-  ) cr
-  WHERE cr.rn <= 3
-) c3
-  ON 1=1;
+    p.id_producto,
+    t.id_talle,
+    -- start en 1..cnt
+    CAST((((p.id_producto * 2) % t.cnt) + 1) AS SIGNED) AS start_t,
+    -- pos 1..cnt
+    (MOD((t.rn - (((p.id_producto * 2) % t.cnt) + 1)) + t.cnt, t.cnt) + 1) AS pos_talle
+  FROM productos p
+  JOIN talles_rn t
+    ON MOD((t.rn - (((p.id_producto * 2) % t.cnt) + 1)) + t.cnt, t.cnt) < 3
+),
+sel_colores AS (
+  SELECT
+    p.id_producto,
+    c.id_color,
+    CAST((((p.id_producto * 5) % c.cnt) + 1) AS SIGNED) AS start_c,
+    (MOD((c.rn - (((p.id_producto * 5) % c.cnt) + 1)) + c.cnt, c.cnt) + 1) AS pos_color
+  FROM productos p
+  JOIN colores_rn c
+    ON MOD((c.rn - (((p.id_producto * 5) % c.cnt) + 1)) + c.cnt, c.cnt) < 3
+)
+SELECT
+  p.id_producto,
+  st.id_talle,
+  sc.id_color,
+  ROUND(
+    p.precio_base
+    + CASE st.pos_talle WHEN 1 THEN 0 WHEN 2 THEN 500 WHEN 3 THEN 1000 END
+    + CASE sc.pos_color WHEN 1 THEN 0 WHEN 2 THEN 250 WHEN 3 THEN 400 END
+  , 2) AS precio,
+  (10 + (p.id_producto * 3 + st.pos_talle * 7 + sc.pos_color * 11) % 70) AS stock
+FROM productos p
+JOIN sel_talles st  ON st.id_producto = p.id_producto
+JOIN sel_colores sc ON sc.id_producto = p.id_producto;
 
 -- Inserción masiva en la tabla pedidos
 INSERT INTO pedidos (id_cliente, id_metodo_pago, id_estado_pedido, fecha_pedido, total)
@@ -392,31 +343,37 @@ JOIN (
 
 -- Inserción masiva en la tabla pedido_detalle
 INSERT INTO pedido_detalle (id_pedido, id_variante, cantidad, precio_unitario, subtotal)
+WITH vmap AS (
+  SELECT
+    id_variante,
+    precio,
+    ROW_NUMBER() OVER (ORDER BY id_variante) AS rn,
+    COUNT(*) OVER () AS cnt
+  FROM variantes
+),
+slots AS (
+  SELECT 1 AS seq UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
+),
+cantidades AS (
+  SELECT 1 AS seq, 1 AS cantidad
+  UNION ALL SELECT 2, 2
+  UNION ALL SELECT 3, 3
+  UNION ALL SELECT 4, 1
+  UNION ALL SELECT 5, 2
+)
 SELECT
   p.id_pedido,
-
-  -- Variante distinta por línea dentro del pedido
-  ((p.id_pedido * 10 + s.seq) % (SELECT COUNT(*) FROM variantes)) + 1 AS id_variante,
-
-  -- Cantidad 1..3
-  ((p.id_pedido + s.seq) % 3) + 1 AS cantidad,
-
-  -- Precio unitario desde la tabla variantes
+  v.id_variante,
+  ca.cantidad,
   v.precio AS precio_unitario,
-
-  -- Subtotal = cantidad * precio
-  (((p.id_pedido + s.seq) % 3) + 1) * v.precio AS subtotal
-
+  ca.cantidad * v.precio AS subtotal
 FROM pedidos p
-JOIN (
-  SELECT 1 AS seq UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
-) s
-  -- Se define cuántos ítems tiene cada pedido
+JOIN slots s
   ON s.seq <= ((p.id_pedido % 5) + 1)
-
-JOIN variantes v
-  ON v.id_variante = ((p.id_pedido * 10 + s.seq) % (SELECT COUNT(*) FROM variantes)) + 1
-
+JOIN cantidades ca
+  ON ca.seq = s.seq
+JOIN vmap v
+  ON v.rn = MOD((p.id_pedido * 13) + (s.seq * 7), v.cnt) + 1
 WHERE p.id_pedido <= 1000;
 
 -- Actualización de montos totales de la tabla pedidos
